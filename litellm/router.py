@@ -1270,6 +1270,32 @@ class Router:
                 deployment=deployment, parent_otel_span=parent_otel_span
             )
             self._update_kwargs_with_deployment(deployment=deployment, kwargs=kwargs)
+
+            # Check if majority voting is enabled
+            # Check both kwargs and deployment litellm_params
+            deployment_params = deployment["litellm_params"]
+            algorithm = kwargs.get("algorithm") or deployment_params.get("algorithm")
+
+            if algorithm == "majority-voting":
+                from litellm.router_utils.majority_voting import majority_voting_completion
+
+                # Get budget from kwargs first, then deployment_params
+                budget = kwargs.pop("budget", None)
+                if budget is None:
+                    budget = deployment_params.get("budget")
+                if budget is None:
+                    raise ValueError("budget parameter is required when algorithm='majority-voting'")
+
+                # Remove algorithm from kwargs if present
+                kwargs.pop("algorithm", None)
+
+                return await majority_voting_completion(
+                    router_instance=self,
+                    model=model,
+                    messages=messages,
+                    budget=budget,
+                    **kwargs,
+                )
             # No copy needed - data is only read and spread into new dict below
             data = deployment["litellm_params"]
 

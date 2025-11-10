@@ -203,6 +203,10 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
     auto_router_default_model: Optional[str] = None
     auto_router_embedding_model: Optional[str] = None
 
+    # Majority voting params
+    algorithm: Optional[str] = None
+    budget: Optional[int] = None
+
     # Batch/File API Params
     s3_bucket_name: Optional[str] = None
     gcs_bucket_name: Optional[str] = None

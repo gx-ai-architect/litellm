@@ -403,6 +403,9 @@ async def acompletion(
     web_search_options: Optional[OpenAIWebSearchOptions] = None,
     # Session management
     shared_session: Optional["ClientSession"] = None,
+    # ITS (Inference-Time Scaling) params
+    algorithm: Optional[str] = None,
+    budget: Optional[int] = None,
     **kwargs,
 ) -> Union[ModelResponse, CustomStreamWrapper]:
     """
@@ -440,6 +443,8 @@ async def acompletion(
         LITELLM Specific Params
         mock_response (str, optional): If provided, return a mock completion response for testing or debugging purposes (default is None).
         custom_llm_provider (str, optional): Used for Non-OpenAI LLMs, Example usage for bedrock, set model="amazon.titan-tg1-large" and custom_llm_provider="bedrock"
+        algorithm (str, optional): Inference-time scaling algorithm to use. Options: "self-consistency" or "best-of-n" (default is None).
+        budget (int, optional): Number of generations for ITS algorithm. Only used when algorithm is specified (default is None).
     Returns:
         ModelResponse: A response object containing the generated completion and associated metadata.
 
@@ -448,6 +453,56 @@ async def acompletion(
         - The `completion` function is called using `run_in_executor` to execute synchronously in the event loop.
         - If `stream` is True, the function returns an async generator that yields completion lines.
     """
+    # Early dispatch to ITS algorithm if specified
+    if algorithm is not None:
+        from litellm.its_hub_integration import apply_its_algorithm
+
+        return await apply_its_algorithm(
+            model=model,
+            messages=messages,
+            algorithm=algorithm,
+            budget=budget or 5,  # Default budget to 5 if not specified
+            # Pass through all other parameters
+            functions=functions,
+            function_call=function_call,
+            timeout=timeout,
+            temperature=temperature,
+            top_p=top_p,
+            n=n,
+            stream=stream,
+            stream_options=stream_options,
+            stop=stop,
+            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
+            modalities=modalities,
+            prediction=prediction,
+            audio=audio,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            logit_bias=logit_bias,
+            user=user,
+            response_format=response_format,
+            seed=seed,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            logprobs=logprobs,
+            top_logprobs=top_logprobs,
+            deployment_id=deployment_id,
+            reasoning_effort=reasoning_effort,
+            safety_identifier=safety_identifier,
+            service_tier=service_tier,
+            base_url=base_url,
+            api_version=api_version,
+            api_key=api_key,
+            model_list=model_list,
+            extra_headers=extra_headers,
+            thinking=thinking,
+            web_search_options=web_search_options,
+            shared_session=shared_session,
+            **kwargs,
+        )
+
     fallbacks = kwargs.get("fallbacks", None)
     mock_timeout = kwargs.get("mock_timeout", None)
 

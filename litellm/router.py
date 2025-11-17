@@ -1299,6 +1299,15 @@ class Router:
             # No copy needed - data is only read and spread into new dict below
             data = deployment["litellm_params"]
 
+            # Merge ITS parameters from deployment config (if present)
+            # Priority: kwargs (headers/body) > deployment its_params
+            if "its_params" in deployment and deployment["its_params"]:
+                its_params = deployment["its_params"]
+                # Only add ITS params that aren't already in kwargs
+                for key, value in its_params.items():
+                    if key not in kwargs:
+                        kwargs[key] = value
+
             model_name = data["model"]
 
             model_client = self._get_async_openai_model_client(

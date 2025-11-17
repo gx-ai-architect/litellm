@@ -462,7 +462,7 @@ async def acompletion(
             messages=messages,
             algorithm=algorithm,
             budget=budget or 5,  # Default budget to 5 if not specified
-            # Pass through all other parameters
+            # Pass through all other parameters (including litellm_logging_obj in kwargs)
             functions=functions,
             function_call=function_call,
             timeout=timeout,

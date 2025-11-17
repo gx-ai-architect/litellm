@@ -34,7 +34,22 @@ class LiteLLMLanguageModel(AbstractLanguageModel):
                              (temperature, api_key, max_tokens, etc.)
         """
         self.model = model
-        self.litellm_kwargs = litellm_kwargs
+
+        # Only keep parameters that should be passed to the LLM
+        # Filter out internal litellm infrastructure parameters
+        llm_params = {}
+        internal_params = {
+            'litellm_call_id', 'litellm_trace_id', 'proxy_server_request',
+            'metadata', 'secret_fields', 'model_info', 'use_in_pass_through',
+            'use_litellm_proxy', 'merge_reasoning_content_in_choices',
+            'caching', 'client', 'litellm_logging_obj', 'max_retries'
+        }
+
+        for key, value in litellm_kwargs.items():
+            if key not in internal_params:
+                llm_params[key] = value
+
+        self.litellm_kwargs = llm_params
 
     def _convert_to_dict(self, message: Any) -> dict:
         """Convert ChatMessage or dict to dict format."""
@@ -44,11 +59,18 @@ class LiteLLMLanguageModel(AbstractLanguageModel):
             # ChatMessage object from its-hub
             return message.to_dict()
         else:
-            # Fallback - try to extract attributes
-            return {
+            # Fallback - try to extract attributes including tool_calls
+            result = {
                 "role": message.role if hasattr(message, "role") else "user",
                 "content": message.content if hasattr(message, "content") else "",
             }
+            # Include tool_calls if present
+            if hasattr(message, "tool_calls") and message.tool_calls is not None:
+                result["tool_calls"] = message.tool_calls
+            # Include tool_call_id if present
+            if hasattr(message, "tool_call_id") and message.tool_call_id is not None:
+                result["tool_call_id"] = message.tool_call_id
+            return result
 
     async def agenerate(
         self,
@@ -73,6 +95,9 @@ class LiteLLMLanguageModel(AbstractLanguageModel):
         call_kwargs = {**self.litellm_kwargs, **kwargs}
         if stop is not None:
             call_kwargs["stop"] = stop
+
+        # Filter out None values to avoid breaking litellm's logging initialization
+        call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
 
         # Detect batch vs single
         is_batch = isinstance(messages[0], list) if messages else False

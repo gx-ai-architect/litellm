@@ -204,6 +204,65 @@ class ProxyBaseLLMRequestProcessing:
         self.data = data
 
     @staticmethod
+    def _extract_its_headers(request: Request) -> dict:
+        """
+        Extract Inference-Time Scaling (ITS) parameters from X-ITS-* headers.
+
+        Supported headers:
+        - X-ITS-Algorithm: self-consistency | best-of-n
+        - X-ITS-Budget: <integer>
+        - X-ITS-Judge-Model: <model_name>
+        - X-ITS-Judge-Prompt: <custom_prompt>
+        - X-ITS-Judge-Temperature: <float>
+        - X-ITS-Judge-Fallback-Score: <float>
+
+        Returns:
+            dict: ITS parameters extracted from headers
+        """
+        its_params = {}
+
+        # Extract algorithm
+        if algorithm := request.headers.get("X-ITS-Algorithm"):
+            its_params["algorithm"] = algorithm
+
+        # Extract budget (convert to int)
+        if budget := request.headers.get("X-ITS-Budget"):
+            try:
+                its_params["budget"] = int(budget)
+            except ValueError:
+                verbose_proxy_logger.warning(
+                    f"Invalid X-ITS-Budget header value: {budget}. Expected integer."
+                )
+
+        # Extract judge model
+        if judge_model := request.headers.get("X-ITS-Judge-Model"):
+            its_params["judge_model"] = judge_model
+
+        # Extract judge prompt
+        if judge_prompt := request.headers.get("X-ITS-Judge-Prompt"):
+            its_params["judge_prompt"] = judge_prompt
+
+        # Extract judge temperature (convert to float)
+        if judge_temp := request.headers.get("X-ITS-Judge-Temperature"):
+            try:
+                its_params["judge_temperature"] = float(judge_temp)
+            except ValueError:
+                verbose_proxy_logger.warning(
+                    f"Invalid X-ITS-Judge-Temperature header value: {judge_temp}. Expected float."
+                )
+
+        # Extract judge fallback score (convert to float)
+        if fallback_score := request.headers.get("X-ITS-Judge-Fallback-Score"):
+            try:
+                its_params["judge_fallback_score"] = float(fallback_score)
+            except ValueError:
+                verbose_proxy_logger.warning(
+                    f"Invalid X-ITS-Judge-Fallback-Score header value: {fallback_score}. Expected float."
+                )
+
+        return its_params
+
+    @staticmethod
     def get_custom_headers(
         *,
         user_api_key_dict: UserAPIKeyAuth,
@@ -361,6 +420,12 @@ class ProxyBaseLLMRequestProcessing:
             self.data["max_tokens"] = user_max_tokens
         if user_api_base:
             self.data["api_base"] = user_api_base
+
+        ### INFERENCE-TIME SCALING (ITS) HEADERS ###
+        # Extract ITS parameters from X-ITS-* headers (highest priority)
+        its_headers = self._extract_its_headers(request)
+        if its_headers:
+            self.data.update(its_headers)
 
         ### MODEL ALIAS MAPPING ###
         # check if model name in model alias map

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Any
+from typing import Any, Union
 
 # Check Python version first
 if sys.version_info < (3, 10):
@@ -23,7 +23,16 @@ except ImportError as e:
         f"Error: {e}"
     )
 
-from litellm.types.utils import Choices, Message, ModelResponse, Usage
+from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+from litellm.llms.base_llm.base_model_iterator import MockResponseIterator
+from litellm.types.utils import (
+    ChatCompletionMessageToolCall,
+    Choices,
+    Message,
+    ModelResponse,
+    Usage,
+)
 
 from .adapter import LiteLLMLanguageModel
 
@@ -36,7 +45,7 @@ async def apply_its_algorithm(
     algorithm: str,
     budget: int = 5,
     **litellm_kwargs: Any,
-) -> ModelResponse:
+) -> Union[ModelResponse, CustomStreamWrapper]:
     """
     Apply its-hub inference-time scaling algorithm using LiteLLM as the backend.
 
@@ -58,10 +67,11 @@ async def apply_its_algorithm(
                          - judge_fallback_score: Fallback score if parsing fails (default: 5.0)
 
     Returns:
-        ModelResponse with the best/majority result in choices[0].message
+        ModelResponse: When stream=False (default), returns complete response with best/majority result
+        CustomStreamWrapper: When stream=True, returns pseudo-streaming wrapper that yields the result
 
     Raises:
-        ValueError: If algorithm is unknown, budget < 1, or streaming is requested
+        ValueError: If algorithm is unknown or budget < 1
         ImportError: If its-hub is not installed
 
     Examples:
@@ -91,11 +101,17 @@ async def apply_its_algorithm(
     if budget < 1:
         raise ValueError(f"budget must be >= 1, got {budget}")
 
-    if litellm_kwargs.get("stream"):
-        raise ValueError(
-            f"Streaming is not supported with ITS algorithms. "
-            f"algorithm={algorithm} requires multiple complete generations."
-        )
+    # Extract logging object from kwargs if present
+    litellm_logging_obj = litellm_kwargs.pop("litellm_logging_obj", None)
+
+    # Handle streaming: Save flag and disable for internal ITS processing
+    # ITS requires complete responses, so we'll do pseudo-streaming at the end
+    stream_requested = litellm_kwargs.pop("stream", False)
+    stream_options = litellm_kwargs.pop("stream_options", None)
+
+    # Extract tools and tool_choice for passing to ainfer
+    tools = litellm_kwargs.pop("tools", None)
+    tool_choice = litellm_kwargs.pop("tool_choice", None)
 
     # Extract judge-specific parameters for best-of-n
     judge_model = litellm_kwargs.pop("judge_model", None)
@@ -146,7 +162,14 @@ async def apply_its_algorithm(
         )
 
     # Run algorithm with return_response_only=False to get full result object
-    result = await alg.ainfer(lm, chat_messages, budget, return_response_only=False)
+    result = await alg.ainfer(
+        lm,
+        chat_messages,
+        budget,
+        return_response_only=False,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
 
     # Convert its-hub result to LiteLLM ModelResponse
     response = _convert_to_model_response(result, model, algorithm, budget)
@@ -165,6 +188,81 @@ async def apply_its_algorithm(
         response.its_scores = result.scores
         response.its_selected_index = result.selected_index
         response.its_total_responses = len(result.responses)
+
+    # Add ITS metadata to model_call_details for logging
+    # This ensures the metadata is captured in logs even if there's no logging_obj
+    if litellm_logging_obj is not None:
+        # Add ITS metadata from _hidden_params to model_call_details
+        its_metadata = {}
+        if hasattr(response, "_hidden_params") and response._hidden_params:
+            for key in ["its_algorithm", "its_budget", "vote_counts", "scores", "selected_index", "total_responses"]:
+                if key in response._hidden_params:
+                    its_metadata[key] = response._hidden_params[key]
+
+        if its_metadata:
+            litellm_logging_obj.model_call_details["its_metadata"] = its_metadata
+
+            # Also add to litellm_params for visibility in all logging
+            if "litellm_params" not in litellm_logging_obj.model_call_details:
+                litellm_logging_obj.model_call_details["litellm_params"] = {}
+            litellm_logging_obj.model_call_details["litellm_params"]["its_metadata"] = its_metadata
+
+    # Log ITS metadata to console (always visible in proxy logs)
+    import sys
+    print(f"[ITS] Applied {algorithm} with budget={budget}, metadata: {response._hidden_params}", file=sys.stderr, flush=True)
+
+    # Handle pseudo-streaming: Convert complete response to streaming format
+    if stream_requested:
+        import datetime
+
+        # Create a mock iterator that yields the complete response as a single chunk
+        mock_iterator = MockResponseIterator(model_response=response)
+
+        # Use existing logging object if provided, otherwise create a minimal one
+        if litellm_logging_obj is not None:
+            logging_obj = litellm_logging_obj
+        else:
+            # Create a minimal logging object for the stream wrapper
+            # We need this for the CustomStreamWrapper, but we don't need full logging
+            logging_obj = LiteLLMLoggingObj(
+                model=model,
+                messages=messages,
+                stream=True,
+                call_type="acompletion",
+                start_time=datetime.datetime.now(),  # Use datetime object, not float
+                litellm_call_id="its-pseudo-stream",
+                function_id="its-pseudo-stream",
+            )
+
+            # Add call_type to model_call_details for logging callbacks
+            # Normally this is done in update_environment_variables(), but we're creating a minimal logging object
+            logging_obj.model_call_details["call_type"] = "acompletion"
+
+            # Add ITS metadata to model_call_details
+            its_metadata = {}
+            if hasattr(response, "_hidden_params") and response._hidden_params:
+                for key in ["its_algorithm", "its_budget", "vote_counts", "scores", "selected_index", "total_responses"]:
+                    if key in response._hidden_params:
+                        its_metadata[key] = response._hidden_params[key]
+
+            if its_metadata:
+                logging_obj.model_call_details["its_metadata"] = its_metadata
+
+                # Also add to litellm_params for visibility
+                if "litellm_params" not in logging_obj.model_call_details:
+                    logging_obj.model_call_details["litellm_params"] = {}
+                logging_obj.model_call_details["litellm_params"]["its_metadata"] = its_metadata
+
+        # Wrap in CustomStreamWrapper to return proper streaming response
+        stream_wrapper = CustomStreamWrapper(
+            completion_stream=mock_iterator,
+            model=model,
+            custom_llm_provider="openai",  # Use openai format
+            logging_obj=logging_obj,
+            stream_options=stream_options,
+        )
+
+        return stream_wrapper
 
     return response
 
@@ -190,11 +288,19 @@ def _convert_to_model_response(
     # Extract the selected response from its-hub result
     selected_response = its_result.the_one
 
+    # Convert tool_calls from dicts to ChatCompletionMessageToolCall objects if present
+    tool_calls = None
+    if "tool_calls" in selected_response and selected_response["tool_calls"] is not None:
+        tool_calls = [
+            ChatCompletionMessageToolCall(**tc) if isinstance(tc, dict) else tc
+            for tc in selected_response["tool_calls"]
+        ]
+
     # Create Message object from selected response
     message = Message(
         role=selected_response.get("role", "assistant"),
         content=selected_response.get("content"),
-        tool_calls=selected_response.get("tool_calls"),
+        tool_calls=tool_calls,
     )
 
     # Create Choices object
@@ -231,7 +337,9 @@ def _convert_to_model_response(
     response = ModelResponse(
         choices=[choice],
         model=model,
-        _hidden_params=hidden_params,
     )
+
+    # Set _hidden_params as an attribute (ModelResponse constructor may not preserve it)
+    response._hidden_params = hidden_params
 
     return response
